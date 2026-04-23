@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  file-share-cloud:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: file-share-cloud
+    ports:
+      - "8080:8080"
+    volumes:
+      - file-share-data:/data
+      - file-share-db:/data/db
+    environment:
+      - STORAGE_PATH=/data/files
+      - DB_PATH=/data/db/file_share.db
+      - SERVER_URL=http://localhost:8080
+      - HOST=0.0.0.0
+      - PORT=8080
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  file-share-data:
+    driver: local
+  file-share-db:
+    driver: local
