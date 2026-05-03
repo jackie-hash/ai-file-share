@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import Optional, List
 from pathlib import Path
 import json
+from auth import hash_password, verify_password
 
 
 class Database:
@@ -305,6 +306,9 @@ class Database:
         expires_at = (now + timedelta(hours=expires_hours)).isoformat() if expires_hours else None
         created_at = now.isoformat()
 
+        # 密码使用 PBKDF2 哈希存储
+        password_hash = hash_password(password) if password else None
+
         with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -312,7 +316,7 @@ class Database:
                                    expires_at, max_downloads, password_protected)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (share_id, share_code, file_id, creator_agent_id, created_at,
-                 expires_at, max_downloads, password)
+                 expires_at, max_downloads, password_hash)
             )
             conn.commit()
 
@@ -356,9 +360,9 @@ class Database:
         if share.get("max_downloads") and share["download_count"] >= share["max_downloads"]:
             return False, "下载次数已用完", None
 
-        # 检查密码
+        # 检查密码（支持 PBKDF2 哈希和旧版明文）
         if share.get("password_protected"):
-            if not password or password != share["password_protected"]:
+            if not password or not verify_password(password, share["password_protected"]):
                 return False, "需要密码访问", None
 
         return True, None, share

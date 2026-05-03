@@ -37,10 +37,9 @@ class ShareInfo(BaseModel):
 
 
 class FileListItem(BaseModel):
-    id: str
+    file_id: str
     filename: str
     file_size: int
-    file_id: str
     content_type: str
     created_at: str
     tags: Optional[List[str]] = []

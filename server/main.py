@@ -2,13 +2,17 @@
 
 支持多Agent之间的文件快速共享功能
 """
+import json
+import mimetypes
 import os
+import time
 import tempfile
 import secrets
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Annotated, Optional
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header, Depends, Query
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header, Depends, Query, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -69,6 +73,20 @@ async def get_agent_id(x_api_key: Annotated[str, Header(alias="X-API-Key")] = No
     return agent["id"]
 
 
+# 简单的内存速率限制
+_rate_limits: dict[str, list[float]] = {}
+
+def _check_rate_limit(key: str, max_requests: int = 10, window_seconds: int = 60) -> bool:
+    """检查速率限制，返回 True 表示允许"""
+    now = time.time()
+    timestamps = [t for t in _rate_limits.get(key, []) if now - t < window_seconds]
+    if len(timestamps) >= max_requests:
+        return False
+    timestamps.append(now)
+    _rate_limits[key] = timestamps
+    return True
+
+
 # ========== 健康检查 ==========
 
 @app.get("/health", summary="健康检查")
@@ -97,8 +115,12 @@ async def root():
 # ========== Agent 注册 ==========
 
 @app.post("/register/{agent_id}", response_model=RegisterResponse, summary="注册新Agent")
-async def register(agent_id: str):
+async def register(request: Request, agent_id: str):
     """注册一个新 Agent，返回 API Key"""
+    # 速率限制：每个 IP 每分钟最多 5 次注册
+    client_ip = request.client.host if request.client else "unknown"
+    if not _check_rate_limit(f"register:{client_ip}", max_requests=5, window_seconds=60):
+        raise HTTPException(status_code=429, detail="Too many registration attempts, please try again later")
     # 检查是否已存在
     agents = db.list_agents()
     if any(a["id"] == agent_id for a in agents):
@@ -273,10 +295,9 @@ async def list_files(
         share_code = shares[0]["share_code"] if shares else None
 
         file_items.append(FileListItem(
-            id=f["id"],
+            file_id=f["id"],
             filename=f["original_filename"],
             file_size=f["file_size"],
-            file_id=f["id"],
             content_type=f.get("content_type", "application/octet-stream"),
             created_at=f["created_at"],
             tags=tags,
@@ -328,7 +349,6 @@ async def download_file(
     if not content:
         raise HTTPException(status_code=404, detail="File content not found")
 
-    import mimetypes
     media_type = mimetypes.guess_type(file_info["original_filename"])[0] or "application/octet-stream"
 
     return Response(
@@ -411,7 +431,6 @@ async def download_with_password(
     db.increment_download_count(share["id"])
     db.log_download(share["id"], share["file_id"])
 
-    import mimetypes
     media_type = mimetypes.guess_type(share["filename"])[0] or "application/octet-stream"
 
     return Response(
@@ -430,14 +449,10 @@ async def download_by_share(
     share_code: str,
     password: str = Query(None)
 ):
-    """通过分享码下载文件"""
+    """通过分享码下载文件（GET 方式，密码通过查询参数传递）"""
     valid, error, share = db.validate_share(share_code, password)
-
     if not valid:
         raise HTTPException(status_code=403, detail=error)
-
-    if share.get("password_protected") and password != share["password_protected"]:
-        raise HTTPException(status_code=403, detail="Password required")
 
     content = storage.get_file_content(share["file_path"])
     if not content:
@@ -446,7 +461,6 @@ async def download_by_share(
     db.increment_download_count(share["id"])
     db.log_download(share["id"], share["file_id"])
 
-    import mimetypes
     media_type = mimetypes.guess_type(share["filename"])[0] or "application/octet-stream"
 
     return Response(
@@ -541,18 +555,13 @@ async def get_stats(agent_id: str = Depends(get_agent_id)):
 # ========== 管理接口 ==========
 
 @app.get("/admin/agents", summary="列出所有Agent")
-async def list_agents():
-    """列出所有注册的 Agent"""
+async def list_agents(agent_id: str = Depends(get_agent_id)):
+    """列出所有注册的 Agent（需要认证）"""
     agents = db.list_agents()
     return {
         "total": len(agents),
         "agents": [{"id": a["id"], "created_at": a["created_at"], "last_seen": a.get("last_seen")} for a in agents]
     }
-
-
-# 需要添加 json 导入
-import json
-from datetime import datetime
 
 
 if __name__ == "__main__":
